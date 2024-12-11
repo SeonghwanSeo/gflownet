@@ -243,7 +243,7 @@ class DataSource(IterableDataset):
         # TODO: it's really weird that the task is responsible for this and returns a obj_props
         # tensor whose first dimension is possibly not the same as the output???
         obj_props, m_is_valid = self.task.compute_obj_properties(objs)
-        assert obj_props.ndim == 2, "FlatRewards should be (mbsize, n_objectives), even if n_objectives is 1"
+        assert obj_props.ndim == 2, "ObjectProperties should be (mbsize, n_objectives), even if n_objectives is 1"
         # The task may decide some of the objs are invalid, we have to again filter those
         valid_idcs = valid_idcs[m_is_valid]
         all_fr = torch.zeros((len(trajs), obj_props.shape[1]))
@@ -251,9 +251,9 @@ class DataSource(IterableDataset):
         for i in range(len(trajs)):
             trajs[i]["obj_props"] = all_fr[i]
             trajs[i]["is_online"] = mark_as_online
-        # Override the is_valid key in case the task made some objs invalid
-        for i in valid_idcs:
-            trajs[i]["is_valid"] = True
+            # Override the is_valid key in case the task made some objs invalid
+            if i not in valid_idcs:
+                trajs[i]["is_valid"] = False
 
     def compute_log_rewards(self, trajs):
         """Sets trajs' log_reward key by querying the task."""
