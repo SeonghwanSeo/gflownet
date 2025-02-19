@@ -21,7 +21,7 @@ from gflownet.models import bengio2021flow
 from gflownet.tasks.seh_frag_ipc import LogitGFN_IPCTask, SEHFragTrainer_IPC
 from gflownet.tasks.seh_frag_moo import RepeatedCondInfoDataset
 from gflownet.utils import metrics, sascore
-from gflownet.utils.communication.oracle import OracleModule
+from gflownet.utils.communication.reward import RewardModule
 from gflownet.utils.conditioning import FocusRegionConditional, MultiObjectiveWeightedPreferences
 from gflownet.utils.multiobjective_hooks import MultiObjectiveStatsHook, TopKHook
 from gflownet.utils.sqlite_log import SQLiteLogHook
@@ -79,7 +79,7 @@ class MOGFN_IPCTask(LogitGFN_IPCTask):
 
     def setup_communication(self):
         """Set the communication settings"""
-        self._ipc_timeout = 60  # wait up to 1 min for oracle function
+        self._ipc_timeout = 60  # wait up to 1 min for reward process
         self._ipc_tick = 0.1  # 0.1 sec
 
     def sample_conditional_information(self, n: int, train_it: int) -> Dict[str, Tensor]:
@@ -185,8 +185,8 @@ class MOGFN_IPCTask(LogitGFN_IPCTask):
         return LogScalar(clamped_logreward)
 
 
-class SEHMOOOracle(OracleModule):
-    """Oracle Module which communicates with trainer running on the other process."""
+class SEHMOOReward(RewardModule):
+    """Reward Module which communicates with trainer running on the other process."""
 
     def __init__(self, gfn_log_dir: str, device: str = "cuda"):
         super().__init__(gfn_log_dir, verbose_level=logging.INFO)
@@ -209,7 +209,7 @@ class SEHMOOOracle(OracleModule):
     def filter_object(self, obj: tuple[RDMol, Data]) -> bool:
         return obj[1] is not None
 
-    def compute_reward_batch(self, objs: list[tuple[RDMol, Data]]) -> list[list[float]]:
+    def compute_obj_prop_batch(self, objs: list[tuple[RDMol, Data]]) -> list[list[float]]:
         """Modify here if parallel computation is required
 
         Parameters
@@ -455,23 +455,23 @@ def main_gfn(log_dir: str, ipc_method: str):
 
     trial = SEHMOOFragTrainer_IPC(config)
     trial.run()
-    trial.task.terminate_oracle()
+    trial.task.terminate_reward()
 
 
-def main_oracle(gfn_log_dir: str):
-    """Example of how this oracle function can be run.
+def main_reward(gfn_log_dir: str):
+    """Example of how this reward function can be run.
     It load the gfn config and setup IPC module.
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    oracle = SEHMOOOracle(gfn_log_dir, device=device)
-    oracle.run()
+    reward_module = SEHMOOReward(gfn_log_dir, device=device)
+    reward_module.run()
 
 
 if __name__ == "__main__":
     import sys
 
     process = sys.argv[1]
-    assert process in ("gfn", "oracle")
+    assert process in ("gfn", "reward")
 
     log_dir = "./logs/debug_run_seh_frag_moo"
     if process == "gfn":
@@ -479,4 +479,4 @@ if __name__ == "__main__":
         assert ipc_method in ("network", "file", "file-csv")
         main_gfn(log_dir, ipc_method)
     else:
-        main_oracle(log_dir)
+        main_reward(log_dir)

@@ -10,8 +10,8 @@ from gflownet.utils.communication.config import CommunicationConfig
 from gflownet.utils.communication.method import FileSystemIPC, FileSystemIPC_CSV, IPCModule, NetworkIPC
 
 
-class OracleModule:
-    """Oracle Module which communicates with trainer running on the other process.
+class RewardModule:
+    """Reward Module which communicates with trainer running on the other process.
     To avoid the dependency issues, gflownet sources are not imported.
     Therefore, it is available to run without torch library.
     If you want to run reward function on your own dependencies or environments, copy this class.
@@ -32,20 +32,20 @@ class OracleModule:
         # Setup IPC Module
         self.setup_ipc_module()
         self.setup_communication()
-        self.logger: logging.Logger = create_logger("oracle", verbose_level)
+        self.logger: logging.Logger = create_logger("reward", verbose_level)
         self.oracle_idx = 0
 
     def setup_ipc_module(self):
         ipc_cfg = self.cfg
         if ipc_cfg.method == "network":
-            ipc_module = NetworkIPC("oracle", ipc_cfg.network.host, ipc_cfg.network.port)
+            ipc_module = NetworkIPC("reward", ipc_cfg.network.host, ipc_cfg.network.port)
         elif ipc_cfg.method == "file":
             fs_cfg = ipc_cfg.filesystem
-            ipc_module = FileSystemIPC("oracle", fs_cfg.workdir, fs_cfg.overwrite_existing_exp)
+            ipc_module = FileSystemIPC("reward", fs_cfg.workdir, fs_cfg.overwrite_existing_exp)
         elif ipc_cfg.method == "file-csv":
             fs_cfg = ipc_cfg.filesystem
             ipc_module = FileSystemIPC_CSV(
-                "oracle", fs_cfg.workdir, fs_cfg.num_objectives, fs_cfg.overwrite_existing_exp
+                "reward", fs_cfg.workdir, fs_cfg.num_objectives, fs_cfg.overwrite_existing_exp
             )
         else:
             raise NotImplementedError
@@ -62,12 +62,12 @@ class OracleModule:
         while self.wait_sampler():
             # communication: receive objects
             objs = self.from_sampler()
-            # compute rewards
-            rewards, is_valid = self.compute_obj_properties(objs)
-            # communication: send rewards
-            self.to_sampler(rewards, is_valid)
+            # compute obj_props
+            obj_props, is_valid = self.compute_obj_properties(objs)
+            # communication: send obj_props
+            self.to_sampler(obj_props, is_valid)
             # logging (async)
-            self.log(objs, rewards, is_valid)
+            self.log(objs, obj_props, is_valid)
             self.oracle_idx += 1
 
     def compute_obj_properties(self, objs: list[Any]) -> tuple[list[list[float]], list[bool]]:
@@ -82,10 +82,10 @@ class OracleModule:
 
         # reward calculation
         st = time.time()
-        rewards = self._compute_rewards(valid_objs)
+        obj_props = self._compute_obj_props(valid_objs)
         tick = time.time() - st
-        self.logger.debug(f"finish reward calculation! (reward: {tick:.3f} sec)")
-        return rewards, is_valid
+        self.logger.debug(f"finish obj_prop calculation! (obj_prop: {tick:.3f} sec)")
+        return obj_props, is_valid
 
     """Implement following methods!"""
 
@@ -123,7 +123,7 @@ class OracleModule:
         """
         return obj is not None
 
-    def compute_reward_batch(self, objs: list[Any]) -> list[list[float]]:
+    def compute_obj_prop_batch(self, objs: list[Any]) -> list[list[float]]:
         """Modify here if parallel computation is required
 
         Parameters
@@ -133,13 +133,13 @@ class OracleModule:
 
         Returns
         -------
-        rewards_list: list[list[float]]
+        obj_props: list[list[float]]
             Each item of list should be list of reward for each objective
-            assert len(rewards_list) == len(objs)
+            assert len(obj_props) == len(objs)
         """
-        return [self.compute_reward_single(obj) for obj in objs]
+        return [self.compute_obj_prop_single(obj) for obj in objs]
 
-    def compute_reward_single(self, obj: Any) -> list[float]:
+    def compute_obj_prop_single(self, obj: Any) -> list[float]:
         """Implement the reward function which calculates the reward of each object individually
 
         Parameters
@@ -149,21 +149,21 @@ class OracleModule:
 
         Returns
         -------
-        rewards: list[float]
+        obj_props: list[float]
             It shoule be list of the property for each objective
             The negative value would be clipped to 0 because GFlowNets require a non-negative reward.
-            assert len(reward) == self.num_objectives
+            assert len(obj_prop) == self.num_objectives
         """
         raise NotImplementedError
 
-    def log(self, objs: list[Any], rewards: list[list[float]], is_valid: list[bool]):
+    def log(self, objs: list[Any], obj_props: list[list[float]], is_valid: list[bool]):
         """Log Hook
 
         Parameters
         ----------
         objs : list[Any]
             A list of objects
-        rewards : list[list[float]]
+        obj_props : list[list[float]]
             A list of reward for each object
         is_valid : list[bool]
             A list of valid flag of each objects
@@ -175,8 +175,8 @@ class OracleModule:
     def wait_sampler(self) -> bool:
         tick_st = time.time()
         tick = lambda: time.time() - tick_st  # noqa: E731
-        while self.ipc_module.oracle_wait_sampler():
-            if self.ipc_module.oracle_is_terminated():
+        while self.ipc_module.reward_wait_sampler():
+            if self.ipc_module.reward_is_terminated():
                 self.logger.info("Sampler is terminated")
                 return False
             if tick() > self._ipc_timeout:
@@ -188,23 +188,23 @@ class OracleModule:
     def from_sampler(self) -> list[Any]:
         """Receive objects from GFlowNet process
         if the gflownet process is terminated, it will return None"""
-        return self.ipc_module.oracle_from_sampler()
+        return self.ipc_module.reward_from_sampler()
 
-    def to_sampler(self, rewards: list[list[float]], is_valid: list[bool]):
+    def to_sampler(self, obj_props: list[list[float]], is_valid: list[bool]):
         """Send reward to GFlowNet process"""
-        self.ipc_module.oracle_to_sampler(rewards, is_valid)
-        self.ipc_module.oracle_unlock_sampler()
+        self.ipc_module.reward_to_sampler(obj_props, is_valid)
+        self.ipc_module.reward_unlock_sampler()
 
-    def _compute_rewards(self, objs: list[Any]) -> list[list[float]]:
+    def _compute_obj_props(self, objs: list[Any]) -> list[list[float]]:
         """To prevent unsafe actions"""
         if len(objs) == 0:
             return []
         else:
-            rs = self.compute_reward_batch(objs)
+            rs = self.compute_obj_prop_batch(objs)
             for r in rs[1:]:
                 assert (
                     len(r) == self.num_objectives
-                ), f"The length of reward ({len(r)}) should be same to the number of objectives ({self.num_objectives})"
+                ), f"The length of rewards ({len(r)}) should be same to the number of objectives ({self.num_objectives})"
             assert len(rs) == len(
                 objs
             ), f"The number of outputs {len(rs)} should be same to the number of samples ({len(objs)})"

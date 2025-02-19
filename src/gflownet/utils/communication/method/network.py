@@ -23,7 +23,7 @@ class NetworkIPC(IPCModule):
         ----------
         process_type : str
             - GFNTask: 'sampler'
-            - OracleModule: 'oracle'
+            - RewardModule: 'reward'
         host: str
             host for networking
         port: int
@@ -35,7 +35,7 @@ class NetworkIPC(IPCModule):
         self.port = port
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.is_connected = False  # conneciton btw gfn sampler and oracle process
+        self.is_connected = False  # conneciton btw gfn sampler and reward process
         if self.process_type == "sampler":
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.socket.bind((host, port))
@@ -46,28 +46,28 @@ class NetworkIPC(IPCModule):
         self.is_terminate: bool = False
 
     ### GFN ###
-    def sampler_from_oracle(self) -> tuple[list[list[float]], list[bool]]:
+    def sampler_from_reward(self) -> tuple[list[list[float]], list[bool]]:
         self.assert_is_sampler()
         assert self.received_data is not None
-        rewards, is_valid = pickle.loads(self.received_data)  # unserialized
+        obj_props, is_valid = pickle.loads(self.received_data)  # unserialized
         self.received_data = None
         self.data_length = None
-        return rewards, is_valid
+        return obj_props, is_valid
 
-    def sampler_to_oracle(self, objs: list[Any]) -> bool:
+    def sampler_to_reward(self, objs: list[Any]) -> bool:
         self.assert_is_sampler()
         request_data = pickle.dumps(objs)
         request_size = struct.pack("!I", len(request_data))
 
         if not self.is_connected:
-            self.conn, self.addr = self.socket.accept()  # accept connection btw gfn - oracle
+            self.conn, self.addr = self.socket.accept()  # accept connection btw gfn - reward process
             self.conn.settimeout(10)
             self.is_connected = True
         self.conn.send(request_size)
         self.conn.sendall(request_data)
         return True
 
-    def sampler_wait_oracle(self) -> bool:
+    def sampler_wait_reward(self) -> bool:
         self.assert_is_sampler()
         # collect data packets
         # TODO: prevent packet error - if damaged, repeat
@@ -94,34 +94,34 @@ class NetworkIPC(IPCModule):
             return True
         return True
 
-    def sampler_unlock_oracle(self):
+    def sampler_unlock_reward(self):
         self.assert_is_sampler()
 
-    def sampler_terminate_oracle(self):
+    def sampler_terminate_reward(self):
         self.assert_is_sampler()
         self.conn.send(b"")
         self.conn.close()
         self.socket.close()
 
-    ### Oracle Module ###
-    def oracle_from_sampler(self) -> list[Any]:
-        self.assert_is_oracle()
+    ### Reward Module ###
+    def reward_from_sampler(self) -> list[Any]:
+        self.assert_is_reward()
         assert self.received_data is not None
         objs = pickle.loads(self.received_data)  # unserialized
         self.data_length = None
         self.received_data = None
         return objs
 
-    def oracle_to_sampler(self, rewards: list[list[float]], is_valid: list[bool]):
-        self.assert_is_oracle()
-        response_data = pickle.dumps((rewards, is_valid))
+    def reward_to_sampler(self, obj_props: list[list[float]], is_valid: list[bool]):
+        self.assert_is_reward()
+        response_data = pickle.dumps((obj_props, is_valid))
         response_size = struct.pack("!I", len(response_data))
         self.socket.send(response_size)
         self.socket.sendall(response_data)
 
-    def oracle_wait_sampler(self) -> bool:
-        self.assert_is_oracle()
-        # if oracle process is not connected, wait gfn sampler.
+    def reward_wait_sampler(self) -> bool:
+        self.assert_is_reward()
+        # if reward process is not connected, wait gfn sampler.
         if not self.is_connected:
             try:
                 self.socket.connect((self.host, self.port))
@@ -158,9 +158,9 @@ class NetworkIPC(IPCModule):
             return True
         return True
 
-    def oracle_unlock_sampler(self):
-        self.assert_is_oracle()
+    def reward_unlock_sampler(self):
+        self.assert_is_reward()
 
-    def oracle_is_terminated(self):
-        self.assert_is_oracle()
+    def reward_is_terminated(self):
+        self.assert_is_reward()
         return self.is_terminate

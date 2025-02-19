@@ -10,9 +10,9 @@ class NetworkIPCConfig:
     Attributes
     ----------
     host: str
-        Host for networking. should be equal for gfn and oracle processes
+        Host for networking. should be equal for gfn and reward processes
     port: int
-        Port for networking. should be equal for gfn and oracle processes
+        Port for networking. should be equal for gfn and reward processes
     """
 
     host: str = "localhost"
@@ -26,7 +26,7 @@ class FileSystemIPCConfig:
     Attributes
     ----------
     log_dir : str
-        The directory where to communicate.
+        The directory where to communicate. should be equal for gfn and reward processes
     overwrite_existing_exp : bool
         Whether to overwrite the contents of the workdir if it already exists.
         This is unsafe

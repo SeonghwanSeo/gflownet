@@ -17,7 +17,7 @@ from gflownet.envs.frag_mol_env import FragMolBuildingEnvContext
 from gflownet.models import bengio2021flow
 from gflownet.online_trainer import StandardOnlineTrainer
 from gflownet.tasks.seh_frag import SOME_MOLS, LittleSEHDataset
-from gflownet.utils.communication.oracle import OracleModule
+from gflownet.utils.communication.reward import RewardModule
 from gflownet.utils.communication.task import IPCTask
 from gflownet.utils.conditioning import TemperatureConditional
 from gflownet.utils.transforms import to_logreward
@@ -33,7 +33,7 @@ class LogitGFN_IPCTask(IPCTask):
 
     def setup_communication(self):
         """Set the communication settings"""
-        self._ipc_timeout = 60  # wait up to 1 min for oracle function
+        self._ipc_timeout = 60  # wait up to 1 min for reward function
         self._ipc_tick = 0.1  # 0.1 sec
 
     def sample_conditional_information(self, n: int, train_it: int) -> Dict[str, Tensor]:
@@ -43,8 +43,8 @@ class LogitGFN_IPCTask(IPCTask):
         return LogScalar(self.temperature_conditional.transform(cond_info, to_logreward(obj_props)))
 
 
-class SEHOracle(OracleModule):
-    """Oracle Module which communicates with trainer running on the other process."""
+class SEHReward(RewardModule):
+    """Reward Module which communicates with trainer running on the other process."""
 
     def __init__(self, gfn_log_dir: str | Path, device: str = "cuda"):
         super().__init__(gfn_log_dir, verbose_level=logging.INFO)
@@ -66,7 +66,7 @@ class SEHOracle(OracleModule):
     def filter_object(self, obj: Data) -> bool:
         return obj is not None
 
-    def compute_reward_batch(self, objs: list[Data]) -> list[list[float]]:
+    def compute_obj_prop_batch(self, objs: list[Data]) -> list[list[float]]:
         """Modify here if parallel computation is required
 
         Parameters
@@ -179,25 +179,25 @@ def main_gfn(log_dir: str):
 
     trial = SEHFragTrainer_IPC(config)
     trial.run()
-    trial.task.terminate_oracle()
+    trial.task.terminate_reward()
 
 
-def main_oracle(gfn_log_dir: str):
-    """Example of how this oracle function can be run."""
+def main_reward(gfn_log_dir: str):
+    """Example of how this reward function can be run."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    oracle = SEHOracle(gfn_log_dir, device=device)
-    oracle.run()
+    reward_module = SEHReward(gfn_log_dir, device=device)
+    reward_module.run()
 
 
 if __name__ == "__main__":
     import sys
 
     process = sys.argv[1]
-    assert process in ("gfn", "oracle")
+    assert process in ("gfn", "reward")
 
     log_dir = "./logs/debug_run_seh_frag"
 
     if process == "gfn":
         main_gfn(log_dir)
     else:
-        main_oracle(log_dir)
+        main_reward(log_dir)
