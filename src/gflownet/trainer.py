@@ -115,6 +115,9 @@ class GFNTrainer:
         os.makedirs(self.cfg.log_dir)
 
         RDLogger.DisableLog("rdApp.*")
+        torch.manual_seed(self.cfg.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(self.cfg.seed)
         set_worker_rng_seed(self.cfg.seed)
         self.env = GraphBuildingEnv()
         self.setup_data()
