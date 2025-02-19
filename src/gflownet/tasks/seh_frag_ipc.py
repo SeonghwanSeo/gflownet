@@ -23,8 +23,8 @@ from gflownet.utils.conditioning import TemperatureConditional
 from gflownet.utils.transforms import to_logreward
 
 
-class LogitGFN_IPCTask(IPCTask):
-    """IPCTask for temperature-conditioned GFlowNet (LogitGFN)"""
+class TemperatureConditional_IPCTask(IPCTask):
+    """IPCTask for temperature-conditioned GFlowNet"""
 
     def __init__(self, cfg: Config) -> None:
         super().__init__(cfg)
@@ -96,10 +96,10 @@ class SEHReward(RewardModule):
 
 
 class SEHFragTrainer_IPC(StandardOnlineTrainer):
-    task: LogitGFN_IPCTask
+    task: TemperatureConditional_IPCTask
 
     def setup_task(self):
-        self.task = LogitGFN_IPCTask(cfg=self.cfg)
+        self.task = TemperatureConditional_IPCTask(cfg=self.cfg)
 
     # Equal to SEHFragTrainer
     def set_default_hps(self, base: Config):

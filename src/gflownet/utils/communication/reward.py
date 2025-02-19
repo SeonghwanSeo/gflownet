@@ -204,7 +204,7 @@ class RewardModule:
             for r in rs[1:]:
                 assert (
                     len(r) == self.num_objectives
-                ), f"The length of rewards ({len(r)}) should be same to the number of objectives ({self.num_objectives})"
+                ), f"The number of rewards ({len(r)}) is different to the number of objectives ({self.num_objectives})"
             assert len(rs) == len(
                 objs
             ), f"The number of outputs {len(rs)} should be same to the number of samples ({len(objs)})"

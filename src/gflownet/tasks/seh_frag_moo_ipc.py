@@ -18,7 +18,7 @@ from gflownet.algo.multiobjective_reinforce import MultiObjectiveReinforce
 from gflownet.config import Config, init_empty
 from gflownet.data.data_source import DataSource
 from gflownet.models import bengio2021flow
-from gflownet.tasks.seh_frag_ipc import LogitGFN_IPCTask, SEHFragTrainer_IPC
+from gflownet.tasks.seh_frag_ipc import SEHFragTrainer_IPC, TemperatureConditional_IPCTask
 from gflownet.tasks.seh_frag_moo import RepeatedCondInfoDataset
 from gflownet.utils import metrics, sascore
 from gflownet.utils.communication.reward import RewardModule
@@ -54,7 +54,7 @@ def mol2qed(mols: list[RDMol], default=0):
 aux_tasks = {"qed": mol2qed, "sa": mol2sas, "mw": mol2mw}
 
 
-class MOGFN_IPCTask(LogitGFN_IPCTask):
+class MOGFN_IPCTask(TemperatureConditional_IPCTask):
     """IPCTask for multi-objective GFlowNet (MOGFN)"""
 
     def __init__(self, cfg: Config) -> None:
