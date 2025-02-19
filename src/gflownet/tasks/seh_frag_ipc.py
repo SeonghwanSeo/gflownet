@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 from typing import Dict
 from collections import OrderedDict
@@ -9,30 +10,25 @@ from rdkit.Chem.rdchem import Mol as RDMol
 from torch import Tensor
 from torch_geometric.data import Data
 
+from gflownet import LogScalar, ObjectProperties
 from gflownet.config import Config, init_empty
 from gflownet.models import bengio2021flow
 from gflownet.utils.conditioning import TemperatureConditional
 from gflownet.utils.transforms import to_logreward
-from gflownet import LogScalar, ObjectProperties
 
 from gflownet.tasks.seh_frag import SEHFragTrainer
 
-from gflownet.communicate.ipc import IPCModule, FileSystemIPC
-from gflownet.communicate.task import IPCTask
-from gflownet.communicate.oracle import OracleModule
+from gflownet.communication.task import IPCTask
+from gflownet.communication.oracle import OracleModule
 
 
 class LogitGFN_IPCTask(IPCTask):
     """IPCTask for temperature-conditioned GFlowNet (LogitGFN)"""
 
     def __init__(self, cfg: Config) -> None:
-        super().__init__(cfg)
+        super().__init__(cfg, ipc_module=None)
         self.temperature_conditional = TemperatureConditional(cfg)
         self.num_cond_dim = self.temperature_conditional.encoding_size()
-
-    def setup_ipc_module(self, workdir: str | Path):
-        """Create the ipc module here"""
-        self.ipc_module: IPCModule = FileSystemIPC(workdir, "sampler")
 
     def setup_communication(self):
         """Set the communication settings"""
@@ -49,14 +45,10 @@ class LogitGFN_IPCTask(IPCTask):
 class SEHOracle(OracleModule):
     """Oracle Module which communicates with trainer running on the other process."""
 
-    def __init__(self, gfn_log_dir, verbose: bool = True, device: str = "cuda"):
-        super().__init__(gfn_log_dir, verbose)
+    def __init__(self, gfn_log_dir: str | Path, device: str = "cuda"):
+        super().__init__(gfn_log_dir, verbose_level=logging.INFO)
         self.model = bengio2021flow.load_original_model().to(device)
         self.device = device
-
-    def setup_ipc_module(self, workdir: str | Path):
-        """Create the ipc module here"""
-        self.ipc_module: IPCModule = FileSystemIPC(workdir, "oracle")
 
     def setup_communication(self):
         """Set the communication settings"""
@@ -125,14 +117,20 @@ def main_gfn(log_dir: str):
     config.cond.temperature.sample_dist = "uniform"
     config.cond.temperature.dist_params = [0, 64.0]
 
+    # set ipc module using TCP/IP protocol (recommended)
+    config.communication.method = "network"
+    config.communication.network.host = "localhost"
+    config.communication.network.port = 14285
+
     trial = SEHFragTrainer_IPC(config)
     trial.run()
     trial.task.terminate_oracle()
 
 
-def main_oracle(log_dir: str):
+def main_oracle(gfn_log_dir: str):
     """Example of how this oracle function can be run."""
-    oracle = SEHOracle(log_dir, device="cuda")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    oracle = SEHOracle(gfn_log_dir, device=device)
     oracle.run()
 
 
@@ -142,7 +140,8 @@ if __name__ == "__main__":
     process = sys.argv[1]
     assert process in ("gfn", "oracle")
 
-    log_dir = "./logs/debug_run_seh_frag_ipc"
+    log_dir = "./logs/debug_run_seh_frag"
+
     if process == "gfn":
         main_gfn(log_dir)
     else:

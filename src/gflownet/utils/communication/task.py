@@ -1,27 +1,37 @@
 import time
-from pathlib import Path
 import torch
 from torch import Tensor
-
 from typing import Any
 
 from gflownet.config import Config
 from gflownet import GFNTask, ObjectProperties
 
-from gflownet.communicate.ipc import IPCModule, FileSystemIPC
+from gflownet.utils.communication.method import IPCModule, NetworkIPC, FileSystemIPC, FileSystemIPC_CSV
 
 
 class IPCTask(GFNTask):
     """The rewards of objects are calculated by different processs"""
 
-    def __init__(self, config: Config):
-        self.config = config
-        self.setup_ipc_module(Path(config.log_dir) / "_ipc")
+    def __init__(self, cfg: Config, ipc_module: IPCModule | None = None):
+        self.cfg = cfg
+        self.setup_ipc_module()
         self.setup_communication()
 
-    def setup_ipc_module(self, workdir: str | Path):
-        """Create the ipc module here"""
-        self.ipc_module: IPCModule = FileSystemIPC(workdir, "sampler")
+    def setup_ipc_module(self):
+        ipc_cfg = self.cfg.communication
+        if ipc_cfg.method == "network":
+            ipc_module = NetworkIPC("sampler", ipc_cfg.network.host, ipc_cfg.network.port)
+        elif ipc_cfg.method == "file":
+            fs_cfg = ipc_cfg.filesystem
+            ipc_module = FileSystemIPC("sampler", fs_cfg.workdir, fs_cfg.overwrite_existing_exp)
+        elif ipc_cfg.method == "file-csv":
+            fs_cfg = ipc_cfg.filesystem
+            ipc_module = FileSystemIPC_CSV(
+                "sampler", fs_cfg.workdir, fs_cfg.num_objectives, fs_cfg.overwrite_existing_exp
+            )
+        else:
+            raise NotImplementedError
+        self.ipc_module: IPCModule = ipc_module
 
     def setup_communication(self):
         """Set the communication settings"""

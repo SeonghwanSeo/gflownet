@@ -1,9 +1,10 @@
-from pathlib import Path
+import logging
 from typing import Dict
 from collections import OrderedDict
 
 import numpy as np
 import torch
+from torch import nn
 import torch_geometric.data as gd
 from rdkit.Chem.rdchem import Mol as RDMol
 from rdkit.Chem import QED, Descriptors
@@ -21,11 +22,10 @@ from gflownet.utils.conditioning import (
 )
 from gflownet.utils.transforms import to_logreward
 
-from gflownet.tasks.seh_frag_moo import SEHMOOFragTrainer
+from gflownet.utils.communication.task import IPCTask
+from gflownet.utils.communication.oracle import OracleModule
 
-from gflownet.communicate.ipc import IPCModule, FileSystemIPC
-from gflownet.communicate.task import IPCTask
-from gflownet.communicate.oracle import OracleModule
+from gflownet.tasks.seh_frag_moo import SEHMOOFragTrainer
 
 
 def safe(f, x, default):
@@ -62,9 +62,8 @@ class MOGFN_IPCTask(IPCTask):
         self.temperature_conditional = TemperatureConditional(cfg)
         self.num_cond_dim = self.temperature_conditional.encoding_size()
 
-        self.cfg = cfg
         mcfg = self.cfg.task.seh_moo
-        self.objectives = cfg.task.seh_moo.objectives
+        self.objectives = mcfg.objectives
         cfg.cond.moo.num_objectives = len(self.objectives)  # This value is used by the focus_cond and pref_cond
         if self.cfg.cond.focus_region.focus_type is not None:
             self.focus_cond = FocusRegionConditional(self.cfg, mcfg.n_valid)
@@ -80,10 +79,6 @@ class MOGFN_IPCTask(IPCTask):
             + (self.focus_cond.encoding_size() if self.focus_cond is not None else 0)
         )
         assert set(self.objectives) <= {"seh", "qed", "sa", "mw"} and len(self.objectives) == len(set(self.objectives))
-
-    def setup_ipc_module(self, workdir: str | Path):
-        """Create the ipc module here"""
-        self.ipc_module: IPCModule = FileSystemIPC(workdir, "sampler")
 
     def setup_communication(self):
         """Set the communication settings"""
@@ -196,17 +191,11 @@ class MOGFN_IPCTask(IPCTask):
 class SEHMOOOracle(OracleModule):
     """Oracle Module which communicates with trainer running on the other process."""
 
-    def __init__(self, gfn_log_dir, verbose: bool = True, device: str = "cuda"):
-        super().__init__(gfn_log_dir, verbose)
+    def __init__(self, gfn_log_dir: str, device: str = "cuda"):
+        super().__init__(gfn_log_dir, verbose_level=logging.INFO)
+        self.objectives = self.gfn_cfg.task.seh_moo.objectives
         self.model = bengio2021flow.load_original_model().to(device)
         self.device = device
-
-        mcfg = self.cfg.task.seh_moo
-        self.objectives = mcfg.objectives
-
-    def setup_ipc_module(self, workdir: str | Path):
-        """Create the ipc module here"""
-        self.ipc_module: IPCModule = FileSystemIPC(workdir, "oracle")
 
     def setup_communication(self):
         """Set the communication settings"""
@@ -259,7 +248,7 @@ class SEHMOOOracle(OracleModule):
     def log(self, objs: list[Data], rewards: list[list[float]], is_valid: list[bool]):
         info = OrderedDict()
         info["num_objects"] = len(is_valid)
-        info["invalid_trajectories"] = np.mean(is_valid)
+        info["invalid_trajectories"] = 1 - np.mean(is_valid)
         for i, obj in enumerate(self.objectives):
             info[f"sampled_{obj}_avg"] = np.mean([v[i] for v in rewards]) if len(rewards) > 0 else 0.0
         self.logger.info(f"iteration {self.oracle_idx} : " + " ".join(f"{k}:{v:.2f}" for k, v in info.items()))
@@ -298,14 +287,41 @@ def main_gfn(log_dir: str):
     config.task.seh_moo.n_valid = 15
     config.task.seh_moo.n_valid_repeats = 2
 
+    # ipc module setup examples
+    use_ipc_type = "network"
+
+    # TCP/IP protocol, recommended
+    if use_ipc_type == "network":
+        config.communication.method = "network"
+        config.communication.network.host = "localhost"
+        config.communication.network.port = 14285
+
+    # File system, it will be useful when network server is different
+    elif use_ipc_type == "file":
+        config.communication.method = "file"
+        config.communication.filesystem.workdir = "./logs/_ipc_seh_frag_moo"
+        config.communication.filesystem.overwrite_existing_exp = True
+
+    # File system using text format (csv), it will be useful for non-python programs or human feedbacks.
+    elif use_ipc_type == "file-csv":
+        config.communication.method = "file"
+        config.communication.filesystem.workdir = "./logs/_ipc_seh_frag_moo"
+        config.communication.filesystem.num_objectives = 2
+        config.communication.filesystem.overwrite_existing_exp = True
+    else:
+        raise ValueError(use_ipc_type)
+
     trial = SEHMOOFragTrainer_IPC(config)
     trial.run()
     trial.task.terminate_oracle()
 
 
-def main_oracle(log_dir: str):
-    """Example of how this oracle function can be run."""
-    oracle = SEHMOOOracle(log_dir, device="cuda")
+def main_oracle(gfn_log_dir: str):
+    """Example of how this oracle function can be run.
+    It load the gfn config and setup IPC module.
+    """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    oracle = SEHMOOOracle(gfn_log_dir, device=device)
     oracle.run()
 
 
@@ -315,7 +331,7 @@ if __name__ == "__main__":
     process = sys.argv[1]
     assert process in ("gfn", "oracle")
 
-    log_dir = "./logs/debug_run_seh_frag_moo_ipc"
+    log_dir = "./logs/debug_run_seh_frag_moo"
     if process == "gfn":
         main_gfn(log_dir)
     else:
