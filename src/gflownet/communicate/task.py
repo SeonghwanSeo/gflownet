@@ -55,9 +55,9 @@ class IPCTask(GFNTask):
     def wait_oracle(self) -> bool:
         """Wait Oracle Process"""
         tick_st = time.time()
-        while self.ipc_module.oracle_wait_sampler():
-            tick = time.time() - tick_st
-            assert tick <= self._ipc_timeout, f"Timeout! ({tick} sec)"
+        tick = lambda: time.time() - tick_st  # noqa
+        while self.ipc_module.sampler_wait_oracle():
+            assert tick() <= self._ipc_timeout, f"Timeout! ({tick()} sec)"
             time.sleep(self._ipc_tick)
         return True
 
@@ -73,3 +73,7 @@ class IPCTask(GFNTask):
         """
         fr, is_valid = self.ipc_module.sampler_from_oracle()
         return torch.tensor(fr, dtype=torch.float32), torch.tensor(is_valid, dtype=torch.bool)
+
+    def terminate_oracle(self):
+        """Terminate Oracle Orocess"""
+        self.ipc_module.sampler_terminate_oracle()

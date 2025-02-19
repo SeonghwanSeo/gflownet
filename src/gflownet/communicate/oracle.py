@@ -1,4 +1,5 @@
 import sys
+import numpy as np
 import time
 import logging
 from pathlib import Path
@@ -15,8 +16,8 @@ class OracleModule:
     If you want to run reward function on your own dependencies or environments, copy this class.
     """
 
-    def __init__(self, gfn_log_dir: str | Path, verbose: bool = True):
-        # gflownet communicate structure
+    def __init__(self, gfn_log_dir: str | Path, num_oracles: int, verbose_level: int = 1):
+        # gflownet log dir
         self.gfn_log_dir = Path(gfn_log_dir)
         self.config_path = self.gfn_log_dir / "config.yaml"
 
@@ -27,9 +28,13 @@ class OracleModule:
         self.cfg = OmegaConf.load(self.config_path)
 
         # logging
-        self.logger: logging.Logger = self.create_logger(
-            "reward", loglevel=logging.INFO if verbose else logging.WARNING
-        )
+        if verbose_level == 0:
+            loglevel = logging.WARNING
+        elif verbose_level == 1:
+            loglevel = logging.INFO
+        else:
+            loglevel = logging.DEBUG
+        self.logger: logging.Logger = self.create_logger("oracle", loglevel)
         self.oracle_idx = 0
 
         # create ipc module
@@ -59,20 +64,20 @@ class OracleModule:
             self.oracle_idx += 1
 
     def compute_obj_properties(self, objs: list[Any]) -> tuple[list[list[float]], list[bool]]:
-        self.logger.info(f"receive {len(objs)} objects")
+        self.logger.debug(f"receive {len(objs)} objects")
         # convert and filter the objects before reward calculation
         st = time.time()
         converted_objs = [self.convert_object(obj) for obj in objs]
         is_valid = [self.filter_object(obj) for obj in converted_objs]
         valid_objs = [obj for flag, obj in zip(is_valid, converted_objs, strict=True) if flag]
         tick = time.time() - st
-        self.logger.info(f"get the {len(valid_objs)} valid objects (filter: {tick:.3f} sec)")
+        self.logger.debug(f"get the {len(valid_objs)} valid objects (filter: {tick:.3f} sec)")
 
         # reward calculation
         st = time.time()
         rewards = self._compute_rewards(valid_objs)
         tick = time.time() - st
-        self.logger.info(f"finish reward calculation! (reward: {tick:.3f} sec)")
+        self.logger.debug(f"finish reward calculation! (reward: {tick:.3f} sec)")
         return rewards, is_valid
 
     """Implement following methods!"""
@@ -162,17 +167,20 @@ class OracleModule:
 
     def wait_sampler(self) -> bool:
         tick_st = time.time()
+        tick = lambda: time.time() - tick_st  # noqa
         while self.ipc_module.oracle_wait_sampler():
-            tick = time.time() - tick_st
-            if tick > self._ipc_timeout:
-                self.logger.warning(f"Timeout! ({tick} sec)")
+            if self.ipc_module.oracle_is_terminated():
+                self.logger.info("Sampler is terminated")
+                return False
+            if tick() > self._ipc_timeout:
+                self.logger.warning(f"Timeout! ({tick()} sec)")
                 return False
             time.sleep(self._ipc_tick)
         return True
 
     def from_sampler(self) -> list[Any]:
         """Receive objects from GFlowNet process
-        if the gflownet process is termiated, it will return None"""
+        if the gflownet process is terminated, it will return None"""
         return self.ipc_module.oracle_from_sampler()
 
     def to_sampler(self, rewards: list[list[float]], is_valid: list[bool]):

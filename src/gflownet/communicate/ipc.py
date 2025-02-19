@@ -67,6 +67,10 @@ class IPCModule:
         """Send signal to Oracle."""
         raise NotImplementedError
 
+    def sampler_terminate_oracle(self):
+        """Send signal to Oracle to be terminate"""
+        raise NotImplementedError
+
     ### Oracle Module ###
     def oracle_from_sampler(self) -> list[Any]:
         """Receive objects from Sampler process
@@ -95,6 +99,10 @@ class IPCModule:
         """Send signal to Sampler."""
         raise NotImplementedError
 
+    def oracle_is_terminated(self):
+        """Check the sampler is termiated or not"""
+        raise NotImplementedError
+
 
 class FileSystemIPC(IPCModule):
     """IPCModule using FileSystem"""
@@ -102,12 +110,13 @@ class FileSystemIPC(IPCModule):
     def __init__(self, workdir: str | Path, process_name: str):
         super().__init__(workdir, process_name)
         self.lock_file = self.root_dir / "wait.lock"
+        self.terminate_file = self.root_dir / "termiate"
         self.sampler_to_oracle_file = self.root_dir / "objects.pkl"
         self.oracle_to_sampler_file = self.root_dir / "rewards.pkl"
 
         # Only one process for a single gflownet process
         _process_lock = self.root_dir / f"process_{process_name}.lock"
-        assert not _process_lock.exists()
+        assert not _process_lock.exists(), "there is existing process"
         _process_lock.touch()
 
     ### GFN ###
@@ -120,7 +129,7 @@ class FileSystemIPC(IPCModule):
 
     def sampler_to_oracle(self, objs: list[Any]) -> bool:
         self.assert_is_sampler()
-        with self.sampler_to_oracle_file.open("rb") as w:
+        with self.sampler_to_oracle_file.open("wb") as w:
             pickle.dump(objs, w)
         return True
 
@@ -131,6 +140,10 @@ class FileSystemIPC(IPCModule):
     def sampler_unlock_oracle(self):
         self.assert_is_sampler()
         self.lock_file.touch()
+
+    def sampler_terminate_oracle(self):
+        self.assert_is_sampler()
+        self.terminate_file.touch()
 
     ### Oracle Module ###
     def oracle_from_sampler(self) -> list[Any]:
@@ -154,6 +167,10 @@ class FileSystemIPC(IPCModule):
         self.assert_is_oracle()
         """Send signal to Sampler."""
         os.remove(self.lock_file)
+
+    def oracle_is_terminated(self):
+        self.assert_is_oracle()
+        return self.terminate_file.exists()
 
 
 class FileSystemIPC_CSV(FileSystemIPC):

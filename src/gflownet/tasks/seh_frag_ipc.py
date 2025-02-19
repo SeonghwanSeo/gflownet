@@ -1,7 +1,9 @@
 from pathlib import Path
 from typing import Dict
+from collections import OrderedDict
 
 import torch
+import numpy as np
 import torch_geometric.data as gd
 from rdkit.Chem.rdchem import Mol as RDMol
 from torch import Tensor
@@ -34,7 +36,7 @@ class LogitGFN_IPCTask(IPCTask):
 
     def setup_communication(self):
         """Set the communication settings"""
-        self._ipc_timeout = 10  # wait up to 10 sec for oracle function
+        self._ipc_timeout = 60  # wait up to 1 min for oracle function
         self._ipc_tick = 0.1  # 0.1 sec
 
     def sample_conditional_information(self, n: int, train_it: int) -> Dict[str, Tensor]:
@@ -45,6 +47,8 @@ class LogitGFN_IPCTask(IPCTask):
 
 
 class SEHOracle(OracleModule):
+    """Oracle Module which communicates with trainer running on the other process."""
+
     def __init__(self, gfn_log_dir, verbose: bool = True, device: str = "cuda"):
         super().__init__(gfn_log_dir, verbose)
         self.model = bengio2021flow.load_original_model().to(device)
@@ -66,6 +70,9 @@ class SEHOracle(OracleModule):
     def convert_object(self, obj: RDMol) -> Data:
         return bengio2021flow.mol2graph(obj)
 
+    def filter_object(self, obj: Data) -> bool:
+        return obj is not None
+
     def compute_reward_batch(self, objs: list[Data]) -> list[list[float]]:
         """Modify here if parallel computation is required
 
@@ -80,12 +87,19 @@ class SEHOracle(OracleModule):
             Each item of list should be list of reward for each objective
             assert len(rewards_list) == len(objs)
         """
-        batch = gd.Batch.from_data_list([i for i in objs if i is not None])
+        batch = gd.Batch.from_data_list(objs)
         batch.to(self.device)
         preds = self.model(batch).reshape((-1,)).data.cpu() / 8
         preds[preds.isnan()] = 0
-        preds = preds.clip(1e-4, 100).reshape((-1,))
+        preds = preds.clip(1e-4, 100).reshape(-1, 1)
         return preds.tolist()
+
+    def log(self, objs: list[Data], rewards: list[list[float]], is_valid: list[bool]):
+        info = OrderedDict()
+        info["num_objects"] = len(is_valid)
+        info["invalid_trajectories"] = 1 - np.mean(is_valid)
+        info["sampled_rewards_avg"] = np.mean(rewards) if len(rewards) > 0 else 0.0
+        self.logger.info(f"iteration {self.oracle_idx} : " + " ".join(f"{k}:{v:.2f}" for k, v in info.items()))
 
 
 class SEHFragTrainer_IPC(SEHFragTrainer):
@@ -111,23 +125,25 @@ def main_gfn(log_dir: str):
     config.cond.temperature.sample_dist = "uniform"
     config.cond.temperature.dist_params = [0, 64.0]
 
-    trial = SEHFragTrainer(config)
+    trial = SEHFragTrainer_IPC(config)
     trial.run()
+    trial.task.terminate_oracle()
 
 
 def main_oracle(log_dir: str):
     """Example of how this oracle function can be run."""
-    oracle = SEHOracle(log_dir)
+    oracle = SEHOracle(log_dir, device="cuda")
     oracle.run()
 
 
 if __name__ == "__main__":
     import sys
 
-    assert sys.argv[1] in ("gfn", "oracle")
+    process = sys.argv[1]
+    assert process in ("gfn", "oracle")
 
     log_dir = "./logs/debug_run_seh_frag_ipc"
-    if sys.argv[1] == "gfn":
+    if process == "gfn":
         main_gfn(log_dir)
-    elif sys.argv[2] == "oracle":
+    else:
         main_oracle(log_dir)
