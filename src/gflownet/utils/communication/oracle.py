@@ -1,12 +1,13 @@
-import sys
-from pathlib import Path
-import time
 import logging
+import sys
+import time
+from pathlib import Path
 from typing import Any
+
 from omegaconf import OmegaConf
 
-from gflownet.utils.communication.method import IPCModule, NetworkIPC, FileSystemIPC, FileSystemIPC_CSV
 from gflownet.utils.communication.config import CommunicationConfig
+from gflownet.utils.communication.method import FileSystemIPC, FileSystemIPC_CSV, IPCModule, NetworkIPC
 
 
 class OracleModule:
@@ -31,7 +32,7 @@ class OracleModule:
         # Setup IPC Module
         self.setup_ipc_module()
         self.setup_communication()
-        self.logger: logging.Logger = self.create_logger("oracle", verbose_level)
+        self.logger: logging.Logger = create_logger("oracle", verbose_level)
         self.oracle_idx = 0
 
     def setup_ipc_module(self):
@@ -173,7 +174,7 @@ class OracleModule:
 
     def wait_sampler(self) -> bool:
         tick_st = time.time()
-        tick = lambda: time.time() - tick_st  # noqa
+        tick = lambda: time.time() - tick_st  # noqa: E731
         while self.ipc_module.oracle_wait_sampler():
             if self.ipc_module.oracle_is_terminated():
                 self.logger.info("Sampler is terminated")
@@ -209,17 +210,22 @@ class OracleModule:
             ), f"The number of outputs {len(rs)} should be same to the number of samples ({len(objs)})"
             return rs
 
-    def create_logger(self, name="logger", loglevel=logging.INFO) -> logging.Logger:
-        logger = logging.getLogger(name)
-        logger.setLevel(loglevel)
-        while len([logger.removeHandler(i) for i in logger.handlers]):
-            pass  # Remove all handlers (only useful when debugging)
-        formatter = logging.Formatter(
-            fmt=f"%(asctime)s - %(levelname)s - {name} - %(message)s",
-            datefmt="%d/%m/%Y %H:%M:%S",
-        )
-        handler = logging.StreamHandler(stream=sys.stdout)
+
+def create_logger(name="logger", loglevel=logging.INFO):
+    logger = logging.getLogger(name)
+    logger.setLevel(loglevel)
+    while len([logger.removeHandler(i) for i in logger.handlers]):
+        pass  # Remove all handlers (only useful when debugging)
+    formatter = logging.Formatter(
+        fmt="%(asctime)s - %(levelname)s - {} - %(message)s".format(name),
+        datefmt="%d/%m/%Y %H:%M:%S",
+    )
+
+    handlers = []
+    handlers.append(logging.StreamHandler(stream=sys.stdout))
+
+    for handler in handlers:
         handler.setFormatter(formatter)
         logger.addHandler(handler)
 
-        return logger
+    return logger

@@ -1,10 +1,11 @@
 import logging
+import socket
+from collections import OrderedDict
 from pathlib import Path
 from typing import Dict
-from collections import OrderedDict
 
-import torch
 import numpy as np
+import torch
 import torch_geometric.data as gd
 from rdkit.Chem.rdchem import Mol as RDMol
 from torch import Tensor
@@ -12,21 +13,21 @@ from torch_geometric.data import Data
 
 from gflownet import LogScalar, ObjectProperties
 from gflownet.config import Config, init_empty
+from gflownet.envs.frag_mol_env import FragMolBuildingEnvContext
 from gflownet.models import bengio2021flow
+from gflownet.online_trainer import StandardOnlineTrainer
+from gflownet.tasks.seh_frag import SOME_MOLS, LittleSEHDataset
+from gflownet.utils.communication.oracle import OracleModule
+from gflownet.utils.communication.task import IPCTask
 from gflownet.utils.conditioning import TemperatureConditional
 from gflownet.utils.transforms import to_logreward
-
-from gflownet.tasks.seh_frag import SEHFragTrainer
-
-from gflownet.communication.task import IPCTask
-from gflownet.communication.oracle import OracleModule
 
 
 class LogitGFN_IPCTask(IPCTask):
     """IPCTask for temperature-conditioned GFlowNet (LogitGFN)"""
 
     def __init__(self, cfg: Config) -> None:
-        super().__init__(cfg, ipc_module=None)
+        super().__init__(cfg)
         self.temperature_conditional = TemperatureConditional(cfg)
         self.num_cond_dim = self.temperature_conditional.encoding_size()
 
@@ -87,18 +88,72 @@ class SEHOracle(OracleModule):
         return preds.tolist()
 
     def log(self, objs: list[Data], rewards: list[list[float]], is_valid: list[bool]):
-        info = OrderedDict()
+        info: OrderedDict[str, float | int] = OrderedDict()
         info["num_objects"] = len(is_valid)
-        info["invalid_trajectories"] = 1 - np.mean(is_valid)
-        info["sampled_rewards_avg"] = np.mean(rewards) if len(rewards) > 0 else 0.0
+        info["invalid_trajectories"] = 1.0 - float(np.mean(is_valid))
+        info["sampled_rewards_avg"] = float(np.mean(rewards)) if len(rewards) > 0 else 0.0
         self.logger.info(f"iteration {self.oracle_idx} : " + " ".join(f"{k}:{v:.2f}" for k, v in info.items()))
 
 
-class SEHFragTrainer_IPC(SEHFragTrainer):
+class SEHFragTrainer_IPC(StandardOnlineTrainer):
     task: LogitGFN_IPCTask
 
     def setup_task(self):
         self.task = LogitGFN_IPCTask(cfg=self.cfg)
+
+    # Equal to SEHFragTrainer
+    def set_default_hps(self, base: Config):
+        base.hostname = socket.gethostname()
+        base.pickle_mp_messages = False
+        base.num_workers = 8
+        base.opt.learning_rate = 1e-4
+        base.opt.weight_decay = 1e-8
+        base.opt.momentum = 0.9
+        base.opt.adam_eps = 1e-8
+        base.opt.lr_decay = 20_000
+        base.opt.clip_grad_type = "norm"
+        base.opt.clip_grad_param = 10
+        base.algo.num_from_policy = 64
+        base.model.num_emb = 128
+        base.model.num_layers = 4
+
+        base.algo.method = "TB"
+        base.algo.max_nodes = 9
+        base.algo.sampling_tau = 0.9
+        base.algo.illegal_action_logreward = -75
+        base.algo.train_random_action_prob = 0.0
+        base.algo.valid_random_action_prob = 0.0
+        base.algo.valid_num_from_policy = 64
+        base.num_validation_gen_steps = 10
+        base.algo.tb.epsilon = None
+        base.algo.tb.bootstrap_own_reward = False
+        base.algo.tb.Z_learning_rate = 1e-3
+        base.algo.tb.Z_lr_decay = 50_000
+        base.algo.tb.do_parameterize_p_b = False
+        base.algo.tb.do_sample_p_b = True
+
+        base.replay.use = False
+        base.replay.capacity = 10_000
+        base.replay.warmup = 1_000
+
+    def setup_data(self):
+        super().setup_data()
+        if self.cfg.task.seh.reduced_frag:
+            # The examples don't work with the 18 frags
+            self.training_data = LittleSEHDataset([])
+        else:
+            self.training_data = LittleSEHDataset(SOME_MOLS)
+
+    def setup_env_context(self):
+        self.ctx = FragMolBuildingEnvContext(
+            max_frags=self.cfg.algo.max_nodes,
+            num_cond_dim=self.task.num_cond_dim,
+            fragments=bengio2021flow.FRAGMENTS_18 if self.cfg.task.seh.reduced_frag else bengio2021flow.FRAGMENTS,
+        )
+
+    def setup(self):
+        super().setup()
+        self.training_data.setup(self.task, self.ctx)
 
 
 def main_gfn(log_dir: str):

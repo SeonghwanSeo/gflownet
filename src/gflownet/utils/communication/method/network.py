@@ -5,7 +5,6 @@ from typing import Any
 
 from gflownet.utils.communication.method.base import IPCModule
 
-
 PACKET_SIZE = 4096
 
 

@@ -1,18 +1,18 @@
 import time
-import torch
-from torch import Tensor
 from typing import Any
 
-from gflownet.config import Config
-from gflownet import GFNTask, ObjectProperties
+import torch
+from torch import Tensor
 
-from gflownet.utils.communication.method import IPCModule, NetworkIPC, FileSystemIPC, FileSystemIPC_CSV
+from gflownet import GFNTask, ObjectProperties
+from gflownet.config import Config
+from gflownet.utils.communication.method import FileSystemIPC, FileSystemIPC_CSV, IPCModule, NetworkIPC
 
 
 class IPCTask(GFNTask):
     """The rewards of objects are calculated by different processs"""
 
-    def __init__(self, cfg: Config, ipc_module: IPCModule | None = None):
+    def __init__(self, cfg: Config):
         self.cfg = cfg
         self.setup_ipc_module()
         self.setup_communication()
@@ -65,7 +65,7 @@ class IPCTask(GFNTask):
     def wait_oracle(self) -> bool:
         """Wait Oracle Process"""
         tick_st = time.time()
-        tick = lambda: time.time() - tick_st  # noqa
+        tick = lambda: time.time() - tick_st  # noqa: E731
         while self.ipc_module.sampler_wait_oracle():
             assert tick() <= self._ipc_timeout, f"Timeout! ({tick()} sec)"
             time.sleep(self._ipc_tick)

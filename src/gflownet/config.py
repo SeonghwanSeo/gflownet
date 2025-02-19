@@ -7,8 +7,8 @@ from gflownet.algo.config import AlgoConfig
 from gflownet.data.config import ReplayConfig
 from gflownet.models.config import ModelConfig
 from gflownet.tasks.config import TasksConfig
-from gflownet.utils.config import ConditionalsConfig
 from gflownet.utils.communication.config import CommunicationConfig
+from gflownet.utils.config import ConditionalsConfig
 from gflownet.utils.misc import StrictDataClass
 
 

@@ -1,31 +1,31 @@
 import logging
-from typing import Dict
+import pathlib
 from collections import OrderedDict
+from typing import Any, Dict
 
 import numpy as np
 import torch
-from torch import nn
 import torch_geometric.data as gd
-from rdkit.Chem.rdchem import Mol as RDMol
 from rdkit.Chem import QED, Descriptors
-from torch import Tensor
+from rdkit.Chem.rdchem import Mol as RDMol
+from torch import Tensor, nn
+from torch.utils.data import DataLoader
 from torch_geometric.data import Data
 
 from gflownet import LogScalar, ObjectProperties
+from gflownet.algo.envelope_q_learning import EnvelopeQLearning, GraphTransformerFragEnvelopeQL
+from gflownet.algo.multiobjective_reinforce import MultiObjectiveReinforce
 from gflownet.config import Config, init_empty
+from gflownet.data.data_source import DataSource
 from gflownet.models import bengio2021flow
+from gflownet.tasks.seh_frag_ipc import LogitGFN_IPCTask, SEHFragTrainer_IPC
+from gflownet.tasks.seh_frag_moo import RepeatedCondInfoDataset
 from gflownet.utils import metrics, sascore
-from gflownet.utils.conditioning import (
-    FocusRegionConditional,
-    MultiObjectiveWeightedPreferences,
-    TemperatureConditional,
-)
-from gflownet.utils.transforms import to_logreward
-
-from gflownet.utils.communication.task import IPCTask
 from gflownet.utils.communication.oracle import OracleModule
-
-from gflownet.tasks.seh_frag_moo import SEHMOOFragTrainer
+from gflownet.utils.conditioning import FocusRegionConditional, MultiObjectiveWeightedPreferences
+from gflownet.utils.multiobjective_hooks import MultiObjectiveStatsHook, TopKHook
+from gflownet.utils.sqlite_log import SQLiteLogHook
+from gflownet.utils.transforms import to_logreward
 
 
 def safe(f, x, default):
@@ -54,14 +54,11 @@ def mol2qed(mols: list[RDMol], default=0):
 aux_tasks = {"qed": mol2qed, "sa": mol2sas, "mw": mol2mw}
 
 
-class MOGFN_IPCTask(IPCTask):
+class MOGFN_IPCTask(LogitGFN_IPCTask):
     """IPCTask for multi-objective GFlowNet (MOGFN)"""
 
     def __init__(self, cfg: Config) -> None:
         super().__init__(cfg)
-        self.temperature_conditional = TemperatureConditional(cfg)
-        self.num_cond_dim = self.temperature_conditional.encoding_size()
-
         mcfg = self.cfg.task.seh_moo
         self.objectives = mcfg.objectives
         cfg.cond.moo.num_objectives = len(self.objectives)  # This value is used by the focus_cond and pref_cond
@@ -86,7 +83,7 @@ class MOGFN_IPCTask(IPCTask):
         self._ipc_tick = 0.1  # 0.1 sec
 
     def sample_conditional_information(self, n: int, train_it: int) -> Dict[str, Tensor]:
-        cond_info = self.temperature_conditional.sample(n)
+        cond_info = super().sample_conditional_information(n, train_it)
         pref_ci = self.pref_cond.sample(n)
         focus_ci = (
             self.focus_cond.sample(n, train_it) if self.focus_cond is not None else {"encoding": torch.zeros(n, 0)}
@@ -246,22 +243,171 @@ class SEHMOOOracle(OracleModule):
         return flat_rewards.tolist()
 
     def log(self, objs: list[Data], rewards: list[list[float]], is_valid: list[bool]):
-        info = OrderedDict()
+        info: OrderedDict[str, float | int] = OrderedDict()
         info["num_objects"] = len(is_valid)
-        info["invalid_trajectories"] = 1 - np.mean(is_valid)
+        info["invalid_trajectories"] = 1.0 - float(np.mean(is_valid))
         for i, obj in enumerate(self.objectives):
-            info[f"sampled_{obj}_avg"] = np.mean([v[i] for v in rewards]) if len(rewards) > 0 else 0.0
+            info[f"sampled_{obj}_avg"] = float(np.mean([v[i] for v in rewards])) if len(rewards) > 0 else 0.0
         self.logger.info(f"iteration {self.oracle_idx} : " + " ".join(f"{k}:{v:.2f}" for k, v in info.items()))
 
 
-class SEHMOOFragTrainer_IPC(SEHMOOFragTrainer):
+class SEHMOOFragTrainer_IPC(SEHFragTrainer_IPC):
     task: MOGFN_IPCTask
 
     def setup_task(self):
         self.task = MOGFN_IPCTask(cfg=self.cfg)
 
+    # Equal to SEHFragTrainer
+    def set_default_hps(self, base: Config):
+        super().set_default_hps(base)
+        base.algo.sampling_tau = 0.95
+        # We sample from a dataset of valid conditional information, so we set this, and override
+        # build_validation_data_loader to use the dataset
+        base.cond.valid_sample_cond_info = False  # TODO deprecate this?
+        base.algo.valid_num_from_dataset = 64
 
-def main_gfn(log_dir: str):
+    def setup_algo(self):
+        algo = self.cfg.algo.method
+        if algo == "MOREINFORCE":
+            self.algo = MultiObjectiveReinforce(self.env, self.ctx, self.cfg)
+        elif algo == "MOQL":
+            self.algo = EnvelopeQLearning(self.env, self.ctx, self.task, self.cfg)
+        else:
+            super().setup_algo()
+
+    def setup_model(self):
+        if self.cfg.algo.method == "MOQL":
+            self.model = GraphTransformerFragEnvelopeQL(
+                self.ctx,
+                num_emb=self.cfg.model.num_emb,
+                num_layers=self.cfg.model.num_layers,
+                num_heads=self.cfg.model.graph_transformer.num_heads,
+                num_objectives=len(self.cfg.task.seh_moo.objectives),
+            )
+        else:
+            super().setup_model()
+
+    def setup(self):
+        super().setup()
+        if self.cfg.task.seh_moo.online_pareto_front:
+            self.sampling_hooks.append(
+                MultiObjectiveStatsHook(
+                    256,
+                    self.cfg.log_dir,
+                    compute_igd=True,
+                    compute_pc_entropy=True,
+                    compute_focus_accuracy=True if self.cfg.cond.focus_region.focus_type is not None else False,
+                    focus_cosim=self.cfg.cond.focus_region.focus_cosim,
+                )
+            )
+            self.to_terminate.append(self.sampling_hooks[-1].terminate)
+        # instantiate preference and focus conditioning vectors for validation
+
+        n_obj = len(self.cfg.task.seh_moo.objectives)
+        cond_cfg = self.cfg.cond
+
+        # making sure hyperparameters for preferences and focus regions are consistent
+        if not (
+            cond_cfg.focus_region.focus_type is None
+            or cond_cfg.focus_region.focus_type == "centered"
+            or (isinstance(cond_cfg.focus_region.focus_type, list) and len(cond_cfg.focus_region.focus_type) == 1)
+        ):
+            assert cond_cfg.weighted_prefs.preference_type is None, (
+                f"Cannot use preferences with multiple focus regions, "
+                f"here focus_type={cond_cfg.focus_region.focus_type} "
+                f"and preference_type={cond_cfg.weighted_prefs.preference_type }"
+            )
+
+        if isinstance(cond_cfg.focus_region.focus_type, list) and len(cond_cfg.focus_region.focus_type) > 1:
+            n_valid = len(cond_cfg.focus_region.focus_type)
+        else:
+            n_valid = self.cfg.task.seh_moo.n_valid
+
+        # preference vectors
+        if cond_cfg.weighted_prefs.preference_type is None:
+            valid_preferences = np.ones((n_valid, n_obj))
+        elif cond_cfg.weighted_prefs.preference_type == "dirichlet":
+            valid_preferences = metrics.partition_hypersphere(d=n_obj, k=n_valid, normalisation="l1")
+        elif cond_cfg.weighted_prefs.preference_type == "seeded_single":
+            seeded_prefs = np.random.default_rng(142857 + int(self.cfg.seed)).dirichlet([1] * n_obj, n_valid)
+            valid_preferences = seeded_prefs[0].reshape((1, n_obj))
+            self.task.seeded_preference = valid_preferences[0]
+        elif cond_cfg.weighted_prefs.preference_type == "seeded_many":
+            valid_preferences = np.random.default_rng(142857 + int(self.cfg.seed)).dirichlet([1] * n_obj, n_valid)
+        else:
+            raise NotImplementedError(f"Unknown preference type {cond_cfg.weighted_prefs.preference_type}")
+
+        # TODO: this was previously reported, would be nice to serialize it
+        # hps["fixed_focus_dirs"] = (
+        #    np.unique(self.task.fixed_focus_dirs, axis=0).tolist() if self.task.fixed_focus_dirs is not None else None
+        # )
+        if self.task.focus_cond is not None:
+            assert self.task.focus_cond.valid_focus_dirs.shape == (
+                n_valid,
+                n_obj,
+            ), (
+                "Invalid shape for valid_preferences, "
+                f"{self.task.focus_cond.valid_focus_dirs.shape} != ({n_valid}, {n_obj})"
+            )
+
+            # combine preferences and focus directions (fixed focus cosim) since they could be used together
+            # (not either/or). TODO: this relies on positional assumptions, should have something cleaner
+            valid_cond_vector = np.concatenate([valid_preferences, self.task.focus_cond.valid_focus_dirs], axis=1)
+        else:
+            valid_cond_vector = valid_preferences
+
+        self.test_data = RepeatedCondInfoDataset(valid_cond_vector, repeat=self.cfg.task.seh_moo.n_valid_repeats)
+
+        self._top_k_hook = TopKHook(10, self.cfg.task.seh_moo.n_valid_repeats, n_valid)
+        if self.cfg.task.seh_moo.log_topk:
+            self.valid_sampling_hooks.append(self._top_k_hook)
+
+        self.algo.task = self.task
+
+    def build_callbacks(self):
+        # We use this class-based setup to be compatible with the DeterminedAI API, but no direct
+        # dependency is required.
+        parent = self
+        callback_dict = {}
+
+        if self.cfg.task.seh_moo.log_topk:
+
+            class TopKMetricCB:
+                def on_validation_end(self, metrics: Dict[str, Any]):
+                    top_k = parent._top_k_hook.finalize()
+                    for i in range(len(top_k)):
+                        metrics[f"topk_rewards_{i}"] = top_k[i]
+                    print("validation end", metrics)
+
+            callback_dict["topk"] = TopKMetricCB()
+
+        return callback_dict
+
+    def build_validation_data_loader(self) -> DataLoader:
+        model = self._wrap_for_mp(self.model)
+
+        src = DataSource(self.cfg, self.ctx, self.algo, self.task, is_algo_eval=True)
+        src.do_conditionals_dataset_in_order(self.test_data, self.cfg.algo.valid_num_from_dataset, model)
+
+        if self.cfg.log_dir:
+            src.add_sampling_hook(SQLiteLogHook(str(pathlib.Path(self.cfg.log_dir) / "valid"), self.ctx))
+        for hook in self.valid_sampling_hooks:
+            src.add_sampling_hook(hook)
+
+        return self._make_data_loader(src)
+
+    def train_batch(self, batch: gd.Batch, epoch_idx: int, batch_idx: int, train_it: int) -> Dict[str, Any]:
+        if self.task.focus_cond is not None:
+            self.task.focus_cond.step_focus_model(batch, train_it)
+        return super().train_batch(batch, epoch_idx, batch_idx, train_it)
+
+    def _save_state(self, it):
+        if self.task.focus_cond is not None and self.task.focus_cond.focus_model is not None:
+            self.task.focus_cond.focus_model.save(pathlib.Path(self.cfg.log_dir))
+        return super()._save_state(it)
+
+
+def main_gfn(log_dir: str, ipc_method: str):
     """Example of how this model can be run."""
     config = init_empty(Config())
     config.desc = "debug_seh_frag_moo"
@@ -288,28 +434,24 @@ def main_gfn(log_dir: str):
     config.task.seh_moo.n_valid_repeats = 2
 
     # ipc module setup examples
-    use_ipc_type = "network"
-
     # TCP/IP protocol, recommended
-    if use_ipc_type == "network":
+    if ipc_method == "network":
         config.communication.method = "network"
         config.communication.network.host = "localhost"
         config.communication.network.port = 14285
-
     # File system, it will be useful when network server is different
-    elif use_ipc_type == "file":
+    elif ipc_method == "file":
         config.communication.method = "file"
         config.communication.filesystem.workdir = "./logs/_ipc_seh_frag_moo"
         config.communication.filesystem.overwrite_existing_exp = True
-
     # File system using text format (csv), it will be useful for non-python programs or human feedbacks.
-    elif use_ipc_type == "file-csv":
+    elif ipc_method == "file-csv":
         config.communication.method = "file"
         config.communication.filesystem.workdir = "./logs/_ipc_seh_frag_moo"
         config.communication.filesystem.num_objectives = 2
         config.communication.filesystem.overwrite_existing_exp = True
     else:
-        raise ValueError(use_ipc_type)
+        raise ValueError(ipc_method)
 
     trial = SEHMOOFragTrainer_IPC(config)
     trial.run()
@@ -333,6 +475,8 @@ if __name__ == "__main__":
 
     log_dir = "./logs/debug_run_seh_frag_moo"
     if process == "gfn":
-        main_gfn(log_dir)
+        ipc_method = sys.argv[2]
+        assert ipc_method in ("network", "file", "file-csv")
+        main_gfn(log_dir, ipc_method)
     else:
         main_oracle(log_dir)
